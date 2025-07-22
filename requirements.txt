@@ -1,0 +1,8 @@
+PyMuPDF
+concurrent-log-handler
+numpy
+langchain 
+sentence-transformers
+chromadb
+google-generativeai
+python-dotenv
