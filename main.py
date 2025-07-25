@@ -1,4 +1,3 @@
-
 PDF_DIR = "./pdfs"
 
 import os
@@ -30,55 +29,42 @@ def extract_text_from_pdfs():
     with concurrent.futures.ProcessPoolExecutor(max_workers=cpu_count()) as executor:
         return list(executor.map(extract_text_from_pdf, pdf_files))
 
-documents = extract_text_from_pdfs()
+def setup_database():
+    """Loads PDFs, splits text, encodes, and stores embeddings in ChromaDB."""
+    documents = extract_text_from_pdfs()
 
-# Split into 512-token chunks
-text_splitter = RecursiveCharacterTextSplitter(chunk_size=512, chunk_overlap=50)
-chunked_docs = [
-    {"text": chunk, "source": doc["filename"], "chunk_id": i}
-    for doc in documents for i, chunk in enumerate(text_splitter.split_text(doc["text"]))
-]
+    # Split into 512-token chunks
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=512, chunk_overlap=50)
+    chunked_docs = [
+        {"text": chunk, "source": doc["filename"], "chunk_id": i}
+        for doc in documents for i, chunk in enumerate(text_splitter.split_text(doc["text"]))
+    ]
 
-model = SentenceTransformer("intfloat/e5-base")  # Efficient model for embeddings
+    model = SentenceTransformer("intfloat/e5-base")
+    all_embeddings = [model.encode(doc["text"], convert_to_tensor=False) for doc in chunked_docs]
 
-all_embeddings = [model.encode(doc["text"], convert_to_tensor=False) for doc in chunked_docs]
+    np.save("./icpc_embeddings.npy", np.array(all_embeddings, dtype=object))
+    np.save("./icpc_chunks.npy", np.array(chunked_docs, dtype=object))
 
-np.save("./icpc_embeddings.npy", np.array(all_embeddings, dtype=object))
-np.save("./icpc_chunks.npy", np.array(chunked_docs, dtype=object))
+    # Initialize ChromaDB
+    chroma_client = chromadb.PersistentClient(path="chroma_db")
+    collection = chroma_client.get_or_create_collection("icpc")
 
-# Load saved embeddings
-embeddings = np.load("icpc_embeddings.npy", allow_pickle=True)
-chunked_docs = np.load("icpc_chunks.npy", allow_pickle=True)
-
-# Initialize ChromaDB
-chroma_client = chromadb.PersistentClient(path="chroma_db")
-collection = chroma_client.get_or_create_collection("icpc")
-
-# Store embeddings in ChromaDB
-for i, (doc, emb) in enumerate(zip(chunked_docs, embeddings)):
-    collection.add(
-        ids=[f"{doc['source']}_chunk_{doc['chunk_id']}"],
-        embeddings=[emb.tolist()],  # Convert numpy array to list
-        metadatas=[{"source": doc["source"], "chunk_id": doc["chunk_id"]}],
-        documents=[doc["text"]]
-    )
-
-
-load_dotenv()  # Loads variables from .env file into the environment
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-
-# Load Sentence Transformer model (same one used for embeddings)
-encoder = SentenceTransformer("intfloat/e5-base")
-
-# Initialize ChromaDB client and collection
-chroma_client = chromadb.PersistentClient(path="chroma_db")
-collection = chroma_client.get_collection("icpc")
-
-# Set up Gemini API key
-genai.configure(api_key=GOOGLE_API_KEY)  # Replace with your actual key
+    # Store embeddings in ChromaDB
+    for i, (doc, emb) in enumerate(zip(chunked_docs, all_embeddings)):
+        collection.add(
+            ids=[f"{doc['source']}_chunk_{doc['chunk_id']}"],
+            embeddings=[emb.tolist()],
+            metadatas=[{"source": doc["source"], "chunk_id": doc["chunk_id"]}],
+            documents=[doc["text"]]
+        )
 
 def retrieve_context(query, top_k=5):
-    """Retrieves top-k most relevant chunks from ChromaDB for a given query."""
+    encoder = SentenceTransformer("intfloat/e5-base")
+
+    chroma_client = chromadb.PersistentClient(path="chroma_db")
+    collection = chroma_client.get_collection("icpc")
+
     query_embedding = encoder.encode(query).tolist()
 
     results = collection.query(
@@ -86,11 +72,10 @@ def retrieve_context(query, top_k=5):
         n_results=top_k
     )
 
-    retrieved_docs = results["documents"][0]  # Extract matched documents
-    return "\n\n".join(retrieved_docs)  # Join chunks into a single context
+    retrieved_docs = results["documents"][0]
+    return "\n\n".join(retrieved_docs)
 
 def generate_answer(query):
-    """Generates an answer using Gemini with NCERT context."""
     context = retrieve_context(query)
 
     prompt = f"""
@@ -124,12 +109,16 @@ def generate_answer(query):
     response = model.generate_content(prompt)
     return response.text
 
-# Example usage
 if __name__ == "__main__":
+    load_dotenv()
+    genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
+
+    # Setup database (run this only once or when PDFs change)
+    setup_database()
+
     while True:
         question = input("\nAsk a question (or type 'exit' to quit): ")
         if question.lower() == "exit":
             break
         print("\nSearching for relevant text...")
         print(generate_answer(question))
-
